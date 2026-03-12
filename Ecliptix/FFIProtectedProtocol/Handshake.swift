@@ -1,8 +1,10 @@
+import Foundation
 import EcliptixProtocolC
 import EcliptixFailures
 
 public final class NativeHandshakeInitiator {
-    public private(set) var handle: OpaquePointer?
+    private let handleLock = NSLock()
+    private var handle: OpaquePointer?
     
     private init(handle: OpaquePointer? = nil) {
         self.handle = handle
@@ -17,10 +19,6 @@ public final class NativeHandshakeInitiator {
         peerPreKeyBundle: [UInt8],
         maxMessagesPerChain: UInt
     ) throws -> NativeHandshakeInitiatorStart {
-        if identityKeys.handle == nil {
-            throw EcliptixProtocolFailure.invalidInput("Identity keys are nill")
-        }
-        
         if maxMessagesPerChain == 0 {
             throw EcliptixProtocolFailure.invalidInput("Max messages per chain must be greater than zero")
         }
@@ -31,15 +29,17 @@ public final class NativeHandshakeInitiator {
         var handshakeInitBuffer = EppBuffer()
         var nativeError = EppError()
 
-        let resultCode = epp_handshake_initiator_start(
-            identityKeys.handle,
-            peerPreKeyBundle,
-            peerPreKeyBundle.count,
-            &config,
-            &handshakeInitiatorHandle,
-            &handshakeInitBuffer,
-            &nativeError
-        )
+        let resultCode = try identityKeys.withHandle { identityHandle in
+            epp_handshake_initiator_start(
+                identityHandle,
+                peerPreKeyBundle,
+                peerPreKeyBundle.count,
+                &config,
+                &handshakeInitiatorHandle,
+                &handshakeInitBuffer,
+                &nativeError
+            )
+        }
         
         guard resultCode == EPP_SUCCESS else {
             let errorMessage = nativeError.getMessage()
@@ -59,35 +59,51 @@ public final class NativeHandshakeInitiator {
     }
     
     public func finish(handshakeAck: [UInt8]) throws -> NativeProtocolSession {
-        if handle == nil {
-            throw EcliptixProtocolFailure.objectDisposed(resourceName: "NativeHandshakeInitiator")
-        }
-        
         var sessionHandle: OpaquePointer? = nil
         var nativeError = EppError()
-        
-        let resultCode = epp_handshake_initiator_finish(
-            handle,
-            handshakeAck,
-            handshakeAck.count,
-            &sessionHandle,
-            &nativeError
-        )
+
+        let (resultCode, handleToDestroy) = try handleLock.withLock { () throws -> (EppErrorCode, OpaquePointer?) in
+            guard let handle else {
+                throw EcliptixProtocolFailure.objectDisposed(resourceName: "NativeHandshakeInitiator")
+            }
+
+            let resultCode = epp_handshake_initiator_finish(
+                handle,
+                handshakeAck,
+                handshakeAck.count,
+                &sessionHandle,
+                &nativeError
+            )
+
+            if resultCode == EPP_SUCCESS {
+                self.handle = nil
+                return (resultCode, handle)
+            }
+
+            return (resultCode, nil)
+        }
         
         guard resultCode == EPP_SUCCESS else {
             let errorMessage = nativeError.getMessage()
             epp_error_free(&nativeError)
             throw InteropHelpers.convertError(resultCode, message: errorMessage)
         }
-        
-        dispose()
+
+        if let handleToDestroy {
+            epp_handshake_initiator_destroy(handleToDestroy)
+        }
+
         return NativeProtocolSession(handle: sessionHandle)
     }
     
     private func dispose() {
-        if let handle {
-            epp_handshake_initiator_destroy(handle)
-            self.handle = nil
+        let handleToDestroy = handleLock.withLock { () -> OpaquePointer? in
+            defer { handle = nil }
+            return handle
+        }
+
+        if let handleToDestroy {
+            epp_handshake_initiator_destroy(handleToDestroy)
         }
     }
 }

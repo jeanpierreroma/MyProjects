@@ -6,7 +6,7 @@ public final class OpaqueClient {
 
     public init(serverPublicKey: [UInt8]) throws {
         if serverPublicKey.count != 32 {
-            throw OpaqueError(message: "Server public key must be exactly \(32) bytes")
+            throw OpaqueError(message: "Server public key must be exactly \(OpaqueConstants.publicKeyLength) bytes")
         }
 
         var handle: UnsafeMutableRawPointer?
@@ -84,7 +84,7 @@ public final class OpaqueClient {
             )
         }
 
-        var recordData = [UInt8](repeating: 0, count: Int(opaque_get_registration_record_length()))
+        var recordData = [UInt8](repeating: 0, count: OpaqueConstants.registrationRecordLength)
         let resultCode = serverResponse.withUnsafeBytes { responseBuffer in
             recordData.withUnsafeMutableBytes { recordBuffer in
                 opaque_client_finalize_registration(
@@ -255,11 +255,11 @@ public final class OpaqueClient {
         OpaqueResult(rawValue: code) ?? .invalidInput
     }
 
-    private static let registrationRequestLength = 32
-    private static let registrationResponseLength = 64
-    private static let ke1Length = Int(opaque_get_ke1_length())
-    private static let ke2Length = Int(opaque_get_ke2_length())
-    private static let ke3Length = Int(opaque_get_ke3_length())
-    private static let sessionKeyLength = 64
-    private static let masterKeyLength = 32
+    private static let registrationRequestLength = OpaqueConstants.registrationRequestLength
+    private static let registrationResponseLength = OpaqueConstants.registrationResponseLength
+    private static let ke1Length = OpaqueConstants.ke1Length
+    private static let ke2Length = OpaqueConstants.ke2Length
+    private static let ke3Length = OpaqueConstants.ke3Length
+    private static let sessionKeyLength = OpaqueConstants.hashLength
+    private static let masterKeyLength = OpaqueConstants.masterKeyLength
 }

@@ -1,12 +1,18 @@
+import Foundation
 import EcliptixProtocolC
 import EcliptixFailures
 import EcliptixProtobufs
 
 public final class NativeProtocolSession {
-    public private(set) var handle: OpaquePointer?
+    private let handleLock = NSLock()
+    private var handle: OpaquePointer?
     
     package init(handle: OpaquePointer? = nil) {
         self.handle = handle
+    }
+
+    deinit {
+        dispose()
     }
     
     public func importState(stateBytes: [UInt8]) throws -> NativeProtocolSession {
@@ -34,22 +40,24 @@ public final class NativeProtocolSession {
     }
     
     public func exportState() throws -> [UInt8] {
-        var buffer = EppBuffer()
-        var nativeError = EppError()
-        
-        let resultCode = epp_session_serialize(
-            handle,
-            &buffer,
-            &nativeError
-        )
-        
-        guard resultCode == EPP_SUCCESS else {
-            let errorMessage = nativeError.getMessage()
-            epp_error_free(&nativeError)
-            throw InteropHelpers.convertError(resultCode, message: errorMessage)
+        try withHandle { handle in
+            var buffer = EppBuffer()
+            var nativeError = EppError()
+
+            let resultCode = epp_session_serialize(
+                handle,
+                &buffer,
+                &nativeError
+            )
+
+            guard resultCode == EPP_SUCCESS else {
+                let errorMessage = nativeError.getMessage()
+                epp_error_free(&nativeError)
+                throw InteropHelpers.convertError(resultCode, message: errorMessage)
+            }
+
+            return try InteropHelpers.copyBuffer(&buffer, label: "Session state")
         }
-        
-        return try InteropHelpers.copyBuffer(&buffer, label: "Session state")
     }
     
     public func encrypt(
@@ -58,88 +66,88 @@ public final class NativeProtocolSession {
         envelopeId: UInt,
         correlationId: String? = nil
     ) throws -> [UInt8] {
-        var correlationIdUtf8Bytes: [UInt8]? = nil
-        if let correlationId, !correlationId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            correlationIdUtf8Bytes = Array(correlationId.utf8)
-        }
-        
-        var encryptedEnvelopeBuffer = EppBuffer()
-        var nativeError = EppError()
-        
-        let resultCode: EppErrorCode = plaintext.withUnsafeBytes { plaintextRawBuffer in
-            let plaintextPointer = plaintextRawBuffer.bindMemory(to: UInt8.self).baseAddress
+        try withHandle { handle in
+            var correlationIdUtf8Bytes: [UInt8]? = nil
+            if let correlationId, !correlationId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                correlationIdUtf8Bytes = Array(correlationId.utf8)
+            }
 
-            if let correlationIdUtf8Bytes {
-                return correlationIdUtf8Bytes.withUnsafeBytes { correlationRawBuffer in
-                    let correlationPointer = correlationRawBuffer.bindMemory(to: UInt8.self).baseAddress
+            var encryptedEnvelopeBuffer = EppBuffer()
+            var nativeError = EppError()
 
+            let resultCode: EppErrorCode = plaintext.withUnsafeBytes { plaintextRawBuffer in
+                let plaintextPointer = plaintextRawBuffer.bindMemory(to: UInt8.self).baseAddress
+
+                if let correlationIdUtf8Bytes {
+                    return correlationIdUtf8Bytes.withUnsafeBytes { correlationRawBuffer in
+                        let correlationPointer = correlationRawBuffer.bindMemory(to: UInt8.self).baseAddress
+
+                        return epp_session_encrypt(
+                            handle,
+                            plaintextPointer,
+                            plaintext.count,
+                            NativeProtocolSession.mapEnvelopeType(envelopeType),
+                            UInt32(envelopeId),
+                            correlationPointer,
+                            correlationIdUtf8Bytes.count,
+                            &encryptedEnvelopeBuffer,
+                            &nativeError
+                        )
+                    }
+                } else {
                     return epp_session_encrypt(
                         handle,
                         plaintextPointer,
                         plaintext.count,
                         NativeProtocolSession.mapEnvelopeType(envelopeType),
                         UInt32(envelopeId),
-                        correlationPointer,
-                        correlationIdUtf8Bytes.count,
+                        nil,
+                        0,
                         &encryptedEnvelopeBuffer,
                         &nativeError
                     )
                 }
-            } else {
-                return epp_session_encrypt(
-                    handle,
-                    plaintextPointer,
-                    plaintext.count,
-                    NativeProtocolSession.mapEnvelopeType(envelopeType),
-                    UInt32(envelopeId),
-                    nil,
-                    0,
-                    &encryptedEnvelopeBuffer,
-                    &nativeError
-                )
             }
+
+            guard resultCode == EPP_SUCCESS else {
+                let errorMessage = nativeError.getMessage()
+                epp_error_free(&nativeError)
+                throw InteropHelpers.convertError(resultCode, message: errorMessage)
+            }
+
+            return try InteropHelpers.copyBuffer(&encryptedEnvelopeBuffer, label: "Encrypted envelope")
         }
-        
-        guard resultCode == EPP_SUCCESS else {
-            let errorMessage = nativeError.getMessage()
-            epp_error_free(&nativeError)
-            throw InteropHelpers.convertError(resultCode, message: errorMessage)
-        }
-        
-        return try InteropHelpers.copyBuffer(&encryptedEnvelopeBuffer, label: "Encrypted envelope")
     }
     
     public func decrypt(encryptedEnvelope: [UInt8]) throws -> ProtocolDecryptResult {
-        if handle == nil {
-            throw EcliptixProtocolFailure.objectDisposed(resourceName: "NativeProtocolSession")
-        }
-        
-        var plaintextBuffer = EppBuffer()
-        var metadataBuffer = EppBuffer()
-        var nativeError = EppError()
-        
-        let resultCode = epp_session_decrypt(
-            handle,
-            encryptedEnvelope,
-            encryptedEnvelope.count,
-            &plaintextBuffer,
-            &metadataBuffer,
-            &nativeError
-        )
-        
-        guard resultCode == EPP_SUCCESS else {
-            let errorMessage = nativeError.getMessage()
-            epp_error_free(&nativeError)
-            throw InteropHelpers.convertError(resultCode, message: errorMessage)
-        }
-        
-        do {
-            let plaintext = try InteropHelpers.copyBuffer(&plaintextBuffer, label: "Plaintext")
-            let metadata = try InteropHelpers.copyBuffer(&metadataBuffer, label: "Metadata")
-            return ProtocolDecryptResult(plaintext: plaintext, metadata: metadata)
-        } catch {
-            epp_buffer_release(&metadataBuffer)
-            throw error
+        try withHandle { handle in
+            var plaintextBuffer = EppBuffer()
+            var metadataBuffer = EppBuffer()
+            var nativeError = EppError()
+
+            let resultCode = epp_session_decrypt(
+                handle,
+                encryptedEnvelope,
+                encryptedEnvelope.count,
+                &plaintextBuffer,
+                &metadataBuffer,
+                &nativeError
+            )
+
+            guard resultCode == EPP_SUCCESS else {
+                let errorMessage = nativeError.getMessage()
+                epp_error_free(&nativeError)
+                throw InteropHelpers.convertError(resultCode, message: errorMessage)
+            }
+
+            do {
+                let plaintext = try InteropHelpers.copyBuffer(&plaintextBuffer, label: "Plaintext")
+                let metadata = try InteropHelpers.copyBuffer(&metadataBuffer, label: "Metadata")
+                return ProtocolDecryptResult(plaintext: plaintext, metadata: metadata)
+            } catch {
+                epp_buffer_release(&metadataBuffer)
+                throw error
+            }
         }
     }
     
@@ -177,6 +185,27 @@ public final class NativeProtocolSession {
 
         default:
             return EPP_ENVELOPE_REQUEST
+        }
+    }
+
+    private func withHandle<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
+        try handleLock.withLock {
+            guard let handle else {
+                throw EcliptixProtocolFailure.objectDisposed(resourceName: "NativeProtocolSession")
+            }
+
+            return try body(handle)
+        }
+    }
+
+    private func dispose() {
+        let handleToDestroy = handleLock.withLock { () -> OpaquePointer? in
+            defer { handle = nil }
+            return handle
+        }
+
+        if let handleToDestroy {
+            epp_session_destroy(handleToDestroy)
         }
     }
 }

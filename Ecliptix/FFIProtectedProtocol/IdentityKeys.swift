@@ -1,18 +1,24 @@
+import Foundation
 import EcliptixProtocolC
 import EcliptixFailures
 
 public final class EcliptixIdentityKeysWrapper {
     
-    public private(set) var handle: OpaquePointer?
+    private let handleLock = NSLock()
+    private var handle: OpaquePointer?
     
     private init(handle: OpaquePointer? = nil) {
         self.handle = handle
     }
     
     deinit {
-        if handle != nil {
-            epp_identity_destroy(handle)
-            handle = nil
+        let handleToDestroy = handleLock.withLock { () -> OpaquePointer? in
+            defer { handle = nil }
+            return handle
+        }
+
+        if let handleToDestroy {
+            epp_identity_destroy(handleToDestroy)
         }
     }
     
@@ -55,5 +61,15 @@ public final class EcliptixIdentityKeysWrapper {
         }
         
         return EcliptixIdentityKeysWrapper(handle: unwrappedHandle)
+    }
+
+    func withHandle<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
+        try handleLock.withLock {
+            guard let handle else {
+                throw EcliptixProtocolFailure.objectDisposed(resourceName: "EcliptixIdentityKeysWrapper")
+            }
+
+            return try body(handle)
+        }
     }
 }
